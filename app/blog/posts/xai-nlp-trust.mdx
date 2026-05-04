@@ -1,0 +1,208 @@
+---
+title: 'Explainability & Trust in NLP: A Comparative Study of SHAP, LIME, and Integrated Gradients on CamemBERT'
+publishedAt: '2025-05-20'
+summary: 'How we fine-tuned a French BERT model for toxicity detection, deployed it on AWS, and measured whether XAI explanations actually build — or erode — user trust. A research-grade study with 33 participants and real production data.'
+image: '/blog/xai-exp.jpg'
+---
+
+<HeroImage src="/blog/xai-exp.jpg" alt="Explainable AI — SHAP and LIME visualizations on NLP predictions" fit="cover" />
+
+The promise of Explainable AI is intuitive: show users *why* a model made a decision, and they will trust it more. The reality is considerably more nuanced.
+
+This project was born from a deceptively simple question — **does an explanation actually increase trust, or can it just as easily destroy it?** To answer it rigorously, we built a full pipeline: a fine-tuned French language model, three competing XAI methods, a production deployment on AWS, and a user study with 33 non-expert participants. What we found challenged some of the field's most comfortable assumptions.
+
+---
+
+## The Problem: Black Boxes Don't Scale
+
+NLP models have reached a level of capability that makes them genuinely useful in high-stakes domains — content moderation, healthcare triage, legal text analysis. But capability without interpretability is a liability. A model that predicts *correctly* but cannot explain *why* is one bad edge case away from losing the user's trust permanently.
+
+The academic literature confirms this asymmetry. Research by Dhuliawala et al. (2023) showed that user trust decreases exponentially after just two confident-but-incorrect predictions. Once lost, that trust is almost impossible to recover. The implication is stark: **explainability is not optional for production AI systems — it is infrastructure**.
+
+Our research focused on three questions no paper had answered simultaneously for French-language toxicity detection: which XAI method produces the most trusted explanations, can explanation quality compensate for model limitations, and does perceived reliability depend more on logical coherence or visual simplicity?
+
+---
+
+## Dataset & Experimental Design
+
+The task: binary classification of toxic vs. non-toxic French text, sourced from forums and social media.
+
+<ImageBlock
+  src="/blog/xai-dataset.png"
+  alt="Dataset structure — toxic vs non-toxic class distribution"
+  caption="282,778 annotated sentences. We used a balanced 50% subsample of 141,000 sentences — reproducible random selection, perfect class equilibrium."
+  fit="contain"
+  height="220"
+/>
+
+The full corpus contained 282,778 manually or semi-automatically annotated sentences. We applied **principled subsampling** — not arbitrary truncation. The 50% subsample (141,000 sentences) was selected with a fixed random seed for reproducibility, with strict 50/50 class balance enforced. The split was 70% training, 30% validation.
+
+This decision mattered. Imbalanced datasets are the single most common source of miscalibrated confidence scores — the exact failure mode that Gambo et al. (2024) linked to a 35% drop in user satisfaction. We eliminated that variable before it could contaminate our XAI results.
+
+---
+
+## Model Selection: Why CamemBERT Won
+
+The exploratory phase was instructive precisely because it failed in the expected ways.
+
+We began with BERT-uncased and GPT-2 — both English-first architectures. Performance on French text was poor enough to be immediately disqualifying. French morphology, gendered agreement, and idiomatic constructions produced systematic errors that no amount of fine-tuning could overcome without linguistic priors.
+
+**CamemBERT** — the French-language adaptation of RoBERTa, trained on 138GB of French text from OSCAR — was the correct tool. Its tokenizer handles French subword segmentation natively; its pre-training has seen the grammatical patterns our toxicity classifier needed to exploit.
+
+<MetricsRow
+  v1="95.82%" l1="CamemBERT accuracy"
+  v2="0.1349" l2="CamemBERT loss"
+  v3="93.77%" l3="GPT-2 baseline"
+/>
+
+The 2-point accuracy gap understates the real difference. CamemBERT handled ambiguous, mixed-content sentences — those containing both toxic and non-toxic elements — far more reliably. GPT-2's failures were concentrated precisely in the hard cases that mattered most for our user study.
+
+<ImageBlock
+  src="/blog/xai-camembert.png"
+  alt="CamemBERT fine-tuning pipeline — tokenization, training loop, validation"
+  caption="8-step fine-tuning pipeline: data loading → tokenization → model init → DataLoaders → training loop → validation → model save → prediction function. Trained on Google Colab GPU, exported for local inference and AWS deployment."
+  fit="contain"
+  height="260"
+/>
+
+One practical constraint shaped the architecture: no local GPU. We trained on Google Colab's free T4 GPU, exported the fine-tuned weights and tokenizer, and transferred them to production via `scp`. The constraint forced discipline — our training code had to be modular enough to run remotely and inference-ready locally.
+
+---
+
+## Three Explanations, Three Philosophies
+
+The core of this research was a head-to-head comparison of three XAI methods applied to the same CamemBERT predictions. Each embodies a fundamentally different theory of what an "explanation" is.
+
+### SHAP — Game Theory as Ground Truth
+
+SHAP (SHapley Additive exPlanations) distributes credit for a prediction across input features using Shapley values from cooperative game theory. The math guarantees three properties that matter for trust: **consistency** (if a feature's impact increases, its attribution cannot decrease), **locality** (attributions sum to the difference between the prediction and the baseline), and **dummy** (features with no impact receive zero attribution).
+
+For transformer models, SHAP's stability is its defining advantage. On similar inputs, the attributions change predictably. Users — even non-expert ones — notice this consistency, even without being able to articulate why. It reads as *reliable*.
+
+The cost: computational expense that makes real-time inference challenging. For our research prototype, this was acceptable. For production at scale, it requires caching strategies or approximate SHAP variants.
+
+### LIME — Local Fidelity, Global Instability
+
+LIME (Local Interpretable Model-agnostic Explanations) builds a simple interpretable model — typically a linear approximation — around the neighborhood of a specific prediction. It perturbs the input, observes how predictions change, and fits the surrogate to those observations.
+
+LIME is fast, intuitive, and visually clean. The highlighted words map directly to what users already expect an explanation to look like. But the randomness introduced by the perturbation process creates variance: run LIME twice on the same sentence and you may get meaningfully different attributions. For ambiguous sentences — exactly the ones where explanation matters most — this instability is precisely what you don't want.
+
+### Integrated Gradients — Neural Precision
+
+Integrated Gradients computes attributions by integrating the gradients of the model's output with respect to its input embeddings along a straight path from a baseline (typically a zero embedding) to the actual input. For transformer architectures like CamemBERT, this is the most architecturally faithful method — it operates on the model's actual internal representations rather than perturbations of the input space.
+
+The limitation is accessibility. The attributions are dense, mathematically precise, and difficult to present in a form that non-experts find interpretable without significant UI scaffolding.
+
+---
+
+## Production Deployment: From Colab to AWS
+
+The interface was built using a decoupled architecture with React for the frontend and Node.js for the backend — stepping away from research prototypes to deliver a production-quality web application designed for non-expert users. Key features: free-form text input or selection from pre-classified examples, model selection (CamemBERT or GPT-2), XAI method selection (LIME, SHAP, Integrated Gradients), and a combined output showing toxicity score plus color-coded word attributions.
+
+Deployment target: AWS EC2 (Ubuntu 22.04) with model artifacts stored on S3.
+```Bash
+
+# Starting the Node.js API server and React frontend build
+pm2 start server.js --name "xai-backend"
+pm2 serve build/ 3000 --name "xai-frontend"
+```
+
+The production pipeline went: user input via React UI → Node.js API layer → Python/CamemBERT inference service → XAI attribution computation → JSON payload sent to React for visual rendering → user feedback collection → Node.js S3 write. User responses were logged to an S3 bucket for persistence and scale.
+
+The deployment surface surfaced the typical infrastructure failures: RAM limits on the t2.micro instance requiring model weight optimization, CORS configuration between the React client and the backend, and a missing sentencepiece dependency that blocked CamemBERT tokenization in the Python microservice. All resolved through incremental debugging — the kind of production experience that Colab notebooks systematically avoid.
+<ImageBlock
+  src="/blog/xai-streamlit.png"
+  alt="Streamlit interface — toxicity analysis with SHAP explanations"
+  caption="The Streamlit interface used in the user study. Users could select any XAI method and immediately see which words drove the prediction."
+  fit="contain"
+  height="300"
+/>
+
+---
+
+## User Study: 33 Participants, Two Questions
+
+The empirical heart of this project was a structured user study with 33 non-expert participants — people with no background in machine learning, confronted with real toxicity predictions and their explanations.
+
+We asked two questions after each interaction:
+
+1. Did the explanation reinforce your confidence in the model?
+2. Do you trust the model's prediction after seeing the explanation?
+
+<ImageBlock
+  src="/blog/xai-results.png"
+  alt="User study results — SHAP vs LIME satisfaction and trust scores"
+  caption="33 participants, non-experts. SHAP achieved 84.4% 'good' satisfaction vs 69.7% for LIME. Trust reinforcement: SHAP 79% yes vs LIME 67% yes."
+  fit="contain"
+  height="260"
+/>
+
+<MetricsRow
+  v1="84.4%" l1="SHAP satisfaction"
+  v2="79%"   l2="SHAP trust rate"
+  v3="69.7%" l3="LIME satisfaction"
+/>
+
+**SHAP won on every metric.** But the more interesting finding was *why* users preferred it — and it was not the reason we expected.
+
+Users did not describe SHAP as "more accurate" or "more mathematical." They described it as **"more consistent"** and **"more logical."** The Shapley value machinery was invisible to them. What they perceived was that similar sentences produced similar explanations — a property that LIME, due to its perturbation randomness, could not guarantee.
+
+The negative feedback cluster was equally revealing. The majority of dissatisfied ratings — for both methods — came from a specific class of sentences: those containing **both toxic and non-toxic elements**. A sentence like "You're fantastic, but your ideas are completely stupid" genuinely challenges binary classification. When the model produced a borderline prediction on such sentences, no XAI method could rescue the user's trust. The explanation faithfully reflected the model's uncertainty — which users read as model failure.
+
+This finding has a direct engineering implication: **XAI cannot compensate for calibration failures**. The path to user trust runs through model accuracy first, explanation quality second.
+
+---
+
+## The Key Finding: Coherence Beats Simplicity
+
+The central theoretical contribution of this work challenges a common assumption in the XAI literature — that simpler, more visual explanations build more trust.
+
+Our data shows the opposite. **User trust is more strongly influenced by perceived logical coherence than by visual simplicity.**
+
+LIME is the more visually intuitive method. Its word highlights map directly to lay intuitions about "which words matter." Yet users trusted SHAP more — despite (or because of) its denser, more structured output. The consistency of SHAP's attributions across similar inputs created a perception of reliability that LIME's variance-prone outputs could not match.
+
+Szymanski et al. (2021) showed that hybrid explanations — combining text and visualizations — work well for non-experts. Our findings refine this: the *stability* of the visualization matters as much as its visual form. An intuitive but unstable explanation is worse than a dense but consistent one.
+
+<Callout>
+  Explainability does not rest on simplicity alone. It rests on perceived coherence. A user who sees the same logic applied consistently will trust a complex explanation more than an unstable simple one.
+</Callout>
+
+---
+
+## Practical Recommendations
+
+Based on the empirical results and the theoretical literature, three recommendations emerge for teams deploying NLP systems in production:
+
+**Use SHAP when auditability is critical.** In domains where decisions must be defensible — content moderation at scale, healthcare, legal text analysis — SHAP's mathematical guarantees and consistency make it the correct default. The computational cost is manageable with caching.
+
+**Use LIME for rapid prototyping and exploratory interfaces.** When iteration speed matters more than explanation stability, LIME's lightweight inference allows fast feedback loops. Ship early, measure user response, then upgrade to SHAP when the product matures.
+
+**Consider a hybrid approach with pedagogical scaffolding.** Our data suggests that the optimal production system shows SHAP attributions by default, with a LIME toggle for users who want a simpler view — combined with contextual help that explains what the highlighting means. Non-experts are not incapable of understanding XAI; they simply need the interpretive context that researchers take for granted.
+
+---
+
+## Results
+
+<MetricsRow
+  v1="95.82%" l1="CamemBERT accuracy"
+  v2="84.4%"  l2="SHAP user satisfaction"
+  v3="33"     l3="Study participants"
+/>
+
+CamemBERT outperformed GPT-2 by 2 points on accuracy and 0.06 on loss across 141,000 French sentences. SHAP achieved 84.4% positive user ratings vs 69.7% for LIME. Trust reinforcement was 79% for SHAP vs 67% for LIME. The primary driver of negative ratings was model calibration failures on ambiguous mixed-content sentences — not explanation quality.
+
+---
+
+## What This Means for Responsible AI
+
+This project is a small piece of a much larger puzzle. The enterprise deployment of NLP systems at scale — in hiring, healthcare, content moderation, credit scoring — creates asymmetries of power that XAI is supposed to correct. Our findings suggest the correction is real but partial.
+
+Explanations *do* build trust. SHAP explanations reinforced confidence for 79% of participants — a meaningful effect. But explanations cannot paper over a poorly calibrated model. The 21% who did not see their trust reinforced were almost exclusively responding to cases where the model itself was uncertain or wrong.
+
+The implication for responsible AI deployment is uncomfortable: **you cannot ship a weak model with strong explanations and expect users to trust it**. The investment in interpretability must be matched by investment in model quality, calibration, and edge case coverage. XAI is infrastructure, not polish.
+
+---
+
+*Stack: CamemBERT · PyTorch · SHAP · LIME · Integrated Gradients · Streamlit · AWS (EC2, S3) · Python · Google Colab*
+
+*Research conducted at CY Tech (ex-EISTI) · Cergy, France · 2025*

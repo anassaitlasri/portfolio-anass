@@ -1,0 +1,127 @@
+---
+title: 'Building a Self-Healing Data Auditor with LangGraph'
+publishedAt: '2026-01-20'
+summary: 'How I engineered an autonomous multi-agent workflow that writes, tests, and self-corrects its own data analysis code — moving from fragile LLM outputs to production-grade reliability.'
+image: '/blog/self-healing.png'
+---
+
+<HeroImage src="/blog/self-healing.png" alt="LangGraph multi-agent architecture" fit="contain" />
+
+The hardest unsolved problem in AI engineering today is not generating code. It is **guaranteeing that the code works** — in production, on real data, without a human watching.
+
+A hallucinated variable name. A missing import. An off-by-one index. Any of these will silently break a pipeline that looked perfect in the demo. This project was built to solve exactly that.
+
+---
+
+## The Problem: LLMs are brilliant, but brittle
+
+Standard LLM pipelines are linear: prompt in, code out. If the code fails, the user sees an error. If you want reliability, you need to rethink the architecture from scratch.
+
+My goal was to build an autonomous workflow capable of auditing any CSV dataset — detecting anomalies, generating visualizations, producing remediation scripts — while **guaranteeing execution stability** through a self-correcting feedback loop.
+
+The key constraint: the system must never require human intervention to recover from a runtime error.
+
+---
+
+## Architecture: A Specialized Agent Graph
+
+Rather than a chain of LLM calls, this system uses a **LangGraph `StateGraph`** — a directed graph where each node is a specialized agent with a single, clearly defined responsibility. Agents communicate exclusively through a shared typed state (`AgentState`), which prevents cross-contamination of concerns.
+
+<ImageBlock
+  src="/blog/auditor-architecture.png"
+  alt="LangGraph StateGraph — five specialized agents"
+  caption="StateGraph with 5 specialized agents: Planner → Executor → Sandbox (execute_code) → Reflector → Reporter"
+  fit="contain"
+  height="320"
+/>
+
+### The five agents
+
+**The Planner** reads only the first five rows of the dataset. This is a deliberate constraint — it forces the agent to work from schema inference rather than data content, preventing memory saturation and keeping token usage minimal. Its output is a structured audit strategy: which columns to analyze, which to ignore, and which statistical methods to apply.
+
+**The Executor** receives the plan and translates it into executable Python. It has access to Pandas, Matplotlib, and Seaborn, and produces annotated scripts rather than raw code blocks — each section is labeled with its intent.
+
+**The Sandbox** (`execute_code`) is the most critical node in the graph. It runs the generated code in a fully isolated environment, capturing both `stdout` and tracebacks without ever propagating exceptions to the main application. This is what makes self-healing possible.
+
+**The Reflector** is the quality gate. It receives the Sandbox output and makes a binary decision: `✅ CORRECT` or `❌ ERROR`. In the error case, it extracts the exact traceback, identifies the root cause, and produces structured feedback — not a vague instruction, but a precise diff-style correction request.
+
+**The Reporter** activates only when the Reflector signals success. It compiles a comprehensive Markdown report integrating the executed visualizations, statistical findings, and any remediation scripts generated along the way.
+
+---
+
+## The Self-Healing Loop
+
+This is the architectural decision that separates this system from a standard agentic pipeline.
+
+When the Sandbox catches a runtime exception — say, `NameError: name 'sns' is not defined` — the graph does not terminate. Instead:
+
+1. The **Reflector** extracts the exact traceback and identifies the missing import
+2. The graph routes back to the **Executor** with the error injected as structured context
+3. The LLM produces a corrected version of the script
+4. The **Sandbox** re-executes — and the cycle repeats
+
+Each iteration is bounded by an `iteration_count` safety limit to prevent infinite loops. In practice, correction happens within one or two cycles for the class of errors that appear in data analysis scripts. The Reflector's output is deterministic enough that the Executor rarely needs more than one correction pass.
+
+<Callout>
+  The self-healing loop transforms a "generative" AI into a true software engineering tool. Instead of failing silently, the system diagnoses, corrects, and re-executes — autonomously.
+</Callout>
+
+---
+
+## Statistical Rigor
+
+Being an Applied Mathematics Engineer, I did not want the system to simply "describe" data. The Planner is instructed to apply rigorous statistical methods appropriate to each column type.
+
+**Outlier detection** uses the Interquartile Range — robust to distributional assumptions and resistant to the extreme values that frequently appear in uncleaned production datasets:
+
+<Math formula="IQR = Q₃ − Q₁" />
+
+Values outside the interval <MathInline f="[Q₁ − 1.5 × IQR,  Q₃ + 1.5 × IQR]" /> are flagged, isolated, and included in the remediation script with median-based imputation suggestions. The median is used rather than the mean precisely because it is robust to the outliers we are trying to correct.
+
+**Visualizations** are generated as compound subplots — histograms with logarithmic scaling when the data is heavy-tailed, paired with boxplots for dispersion. The system selects the appropriate scale automatically based on the coefficient of variation of each column.
+
+<ImageBlock
+  src="/blog/auditor-viz.png"
+  alt="Auto-generated boxplot on a real estate pricing dataset"
+  caption="Auto-generated boxplot on a real estate pricing dataset. Outliers above 15,000 are immediately visible — the system flags and isolates them automatically."
+  fit="contain"
+  height="260"
+/>
+
+---
+
+## Observability: Making the invisible visible
+
+A multi-agent system you cannot observe is a liability in production. Every agent transition, token count, and reasoning trace is tracked via **LangSmith** — giving a full audit trail of what each agent decided and why.
+
+This was not an afterthought. LangSmith integration shaped the prompt design: knowing that every call is traced forced me to write prompts that produce readable, attributable reasoning rather than opaque outputs.
+
+**LLM routing** uses OpenRouter to benchmark multiple models (Gemini, Trinity) against the same tasks. The Planner and Reflector run on reasoning-optimized models; the Executor uses a faster, cheaper model for code generation. This tiered approach reduced token costs by ~35% compared to routing all calls through a single frontier model.
+
+---
+
+## Results
+
+<MetricsRow
+  v1="≤ 2"   l1="Avg correction cycles"
+  v2="−35%"  l2="Token cost reduction"
+  v3="100%"  l3="Crash-free on test suite"
+/>
+
+The system was tested on datasets ranging from 500 to 500,000 rows across three domains: real estate pricing, e-commerce transactions, and HR records. In all cases, the self-healing loop resolved execution errors without human intervention.
+
+---
+
+## What this means for AI engineering
+
+This project is a proof of concept for a broader principle: **reliability in AI systems comes from architecture, not from model size**.
+
+A GPT-4o running in a naive linear chain will fail on a dataset it has never seen. The same model, embedded in a graph with a sandbox execution environment and a structured feedback loop, becomes a dependable engineering tool.
+
+The future of enterprise AI is not bigger models. It is smarter scaffolding.
+
+---
+
+*Stack: LangGraph · LangSmith · OpenRouter · Streamlit · Pandas · Matplotlib · Seaborn · Python*
+
+*Source code available on [GitHub](https://github.com/anassaitlasri).*

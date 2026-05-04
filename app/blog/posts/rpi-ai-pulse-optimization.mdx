@@ -1,0 +1,100 @@
+---
+title: 'Scaling Medical AI: How We Cut Latency by 35% and Costs by 40%'
+publishedAt: '2026-02-10'
+summary: 'How I engineered a parallelized multi-agent workflow to parse medical reports — moving from a slow, token-heavy prototype to a production-grade health assistant.'
+image: '/blog/rpi-ai-pulse.png'
+---
+
+<HeroImage src="/blog/rpi-ai-pulse.png" alt="RPI AI Pulse Architecture Diagram" fit="contain" />
+
+The hardest unsolved problem in medical AI engineering today is not generating a summary. It is **processing dense, multi-page documents quickly and cost-effectively** — in production, on real patient data, without burning through your API budget.
+
+A standard medical lab report is incredibly dense, often spanning over 20 pages. It contains complex tables, unpredictable layouts, and specialized terminology. A slow parsing pipeline or a hallucinated value will silently ruin the user experience. This project was built to solve exactly that for RPI Group.
+
+---
+
+## The Problem: The Token Trap
+
+Standard RAG pipelines are linear: extract text, embed it, and send it to an LLM. When processing a 20-page document page by page, the user is left waiting. 
+
+My goal was to optimize **RPI AI Pulse** — a health assistant where patients upload their lab reports to get insights, clinical summaries, and chat with an AI — while **guaranteeing low latency and cost efficiency**.
+
+Initially, we relied on JigsawStack for OCR. The extraction quality was acceptable, but the pricing model was based on input/output tokens. Because lab reports contain massive amounts of raw text, a single report consumed tens of thousands of tokens, making the unit economics unsustainable. Free open-source OCR alternatives were not an option, as they failed completely on complex tables and dense medical data.
+
+We needed to rethink the architecture from scratch.
+
+---
+
+## Architecture: A Data-Driven Overhaul
+
+Rather than a sequential chain of LLM calls, this system uses a LangGraph architecture optimized for asynchronous map-reduce operations. 
+
+<ImageBlock 
+  src="/blog/RPI_AI_Pulse_Diagram.jpg" 
+  alt="RPI AI Pulse Map-Reduce workflow" 
+  caption="The updated Map-Reduce architecture. Mistral Document AI extracts the text, caches it, and routes it to up to 6 summarization workers simultaneously." 
+  fit="contain" 
+  height="320" 
+/>
+
+### The three architectural shifts
+
+**1. Swapping the OCR Engine:** We replaced the token-heavy JigsawStack with **Mistral Document AI**. It handled medical tables flawlessly and utilized a *per-page* pricing model rather than per-token. This simple infrastructure swap drastically dropped our extraction costs while delivering better results.
+
+**2. Cost-Conscious Caching:** Instead of passing the raw OCR output directly to the LLM in memory, we actively saved the extracted text to a local directory (`txt-results`). This is a crucial engineering fail-safe: if the downstream LLM process crashed or timed out, we could retry the summarization without having to re-pay for the Mistral OCR extraction.
+
+**3. Aggressive LLM Downgrading:** Initially, we assumed a complex medical chatbot required GPT-4o. After rigorous benchmarking, we realized this was overkill. We transitioned the entire pipeline — both the map-reduce summarization nodes and the interactive RAG chatbot — to `gpt-4.1-mini`. By heavily optimizing our system prompts and improving the retrieval logic, `gpt-4.1-mini` achieved the exact same clinical accuracy for a fraction of the cost.
+
+---
+
+## The Asynchronous Execution Loop
+
+This is the architectural decision that separates this system from a standard sequential pipeline.
+
+When a 20-page document is uploaded, the system does not process page 1, then page 2. Instead:
+
+1. **Mistral Document AI** extracts the text globally and caches it.
+2. The graph routes the pages to the **Summarization Workers** using Python's `asyncio`.
+3. The LLMs process up to 6 pages simultaneously in parallel.
+4. The outputs are aggregated and streamed to the user in real-time.
+
+This parallel execution drastically cuts down waiting times. The user sees the chatbot's answers generating instantly, masking any residual backend latency.
+
+<Callout>
+  The parallel execution loop transforms a slow prototype into a scalable product. By mapping pages asynchronously, we decoupled document length from user wait time.
+</Callout>
+
+---
+
+## Retrieval Rigor
+
+Because I was building a health assistant, I did not want the system to simply "guess" answers. The RAG pipeline was tuned with rigorous parameters using `text-embedding-3-small` and FAISS.
+
+*   **Optimal Chunking and Embeddings:** We refined our text chunks to capture table contexts accurately.
+*   **Top-K and Temperature:** We set our retrieval to a strict Top-K to avoid flooding the LLM's context window. To prevent creative hallucinations, we forced the LLM's temperature to 0.
+*   **Maximal Marginal Relevance (MMR):** To avoid duplicate information, we replaced standard similarity search with MMR. This algorithm balances semantic relevance with diversity, ensuring the LLM receives comprehensive patient data (e.g., both cholesterol and liver enzymes) rather than redundant chunks about the exact same blood test.
+         
+---
+## Results
+
+<MetricsRow 
+  v1="−40%" l1="Token cost reduction" 
+  v2="−35%" l2="Latency reduction" 
+  v3=">95%" l3="Data extraction accuracy" 
+/>
+
+The system was benchmarked extensively. The combination of Mistral Document AI, strict caching, and async parallelization slashed our overhead while achieving top-tier accuracy.
+
+---
+
+## What this means for AI engineering
+
+This project is a proof of concept for a broader principle: **scalability in AI systems comes from architecture, not just API calls**.
+
+An expensive LLM running sequentially will fail to deliver a viable B2C product. The same models, embedded in an asynchronous graph with optimal routing and strict retrieval parameters, become a highly profitable engineering tool.
+
+The future of enterprise AI is smart orchestration.
+
+---
+
+*Stack: LangGraph · FastAPI · Mistral Document AI · OpenAI · FAISS · Python (asyncio) · Next.js*

@@ -1,40 +1,42 @@
-import Link from 'next/link'
+// app/components/nav.tsx
+import Link from "next/link";
+
+const BLAU  = "#004D98";
+const GRANA = "#A50044";
 
 const navItems = {
-  '/': {
-    name: 'home',
-  },
-  '/blog': {
-    name: 'blog',
-  },
-  'https://vercel.com/templates/next.js/portfolio-starter-kit': {
-    name: 'deploy',
-  },
-}
+  "/":                                        { name: "home" },
+  "/blog":                                    { name: "projects" },
+  "https://www.linkedin.com/in/anass-ait-lasri": { name: "linkedin" },
+};
 
 export function Navbar() {
   return (
-    <aside className="-ml-[8px] mb-16 tracking-tight">
-      <div className="lg:sticky lg:top-20">
-        <nav
-          className="flex flex-row items-start relative px-0 pb-0 fade md:overflow-auto scroll-pr-6 md:relative"
-          id="nav"
-        >
-          <div className="flex flex-row space-x-0 pr-10">
-            {Object.entries(navItems).map(([path, { name }]) => {
-              return (
-                <Link
-                  key={path}
-                  href={path}
-                  className="transition-all hover:text-neutral-800 dark:hover:text-neutral-200 flex align-middle relative py-1 px-2 m-1"
-                >
-                  {name}
-                </Link>
-              )
-            })}
-          </div>
-        </nav>
-      </div>
+    <aside className="mb-12 -ml-1">
+      <nav className="flex flex-row items-center gap-1" id="nav">
+        {Object.entries(navItems).map(([path, { name }]) => {
+          const isExternal = path.startsWith("http");
+          return (
+            <Link
+              key={path}
+              href={path}
+              {...(isExternal ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+              className="group relative px-2 py-1 text-sm font-medium text-neutral-500
+                         transition-colors duration-200
+                         hover:text-neutral-900 dark:hover:text-neutral-100"
+            >
+              {name}
+              {/* Barça gradient underline on hover */}
+              <span
+                className="absolute bottom-0 left-2 right-2 h-[2px] rounded-full
+                           scale-x-0 transition-transform duration-300 origin-left
+                           group-hover:scale-x-100"
+                style={{ background: `linear-gradient(90deg, ${BLAU}, ${GRANA})` }}
+              />
+            </Link>
+          );
+        })}
+      </nav>
     </aside>
-  )
+  );
 }
